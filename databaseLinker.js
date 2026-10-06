@@ -13,7 +13,9 @@
 const fs = require('fs');
 const path = require('path');
 
-const DB_DIR = path.join(__dirname, 'database');
+const DB_DIR = fs.existsSync(path.join(process.cwd(), 'database'))
+  ? path.join(process.cwd(), 'database')
+  : path.join(__dirname, 'database');
 
 const FIXED_TIMEFRAMES = [
   '1S', '5S', '15S', '30S',
