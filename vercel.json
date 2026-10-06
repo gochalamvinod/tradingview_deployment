@@ -1,0 +1,14 @@
+{
+  "buildCommand": "cd frontend && npm install && npm run build",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    { "source": "/config", "destination": "/api" },
+    { "source": "/time", "destination": "/api" },
+    { "source": "/symbols", "destination": "/api" },
+    { "source": "/history", "destination": "/api" },
+    { "source": "/quotes", "destination": "/api" },
+    { "source": "/search", "destination": "/api" },
+    { "source": "/handshake", "destination": "/api" },
+    { "source": "/api/:path*", "destination": "/api" }
+  ]
+}

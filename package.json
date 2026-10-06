@@ -1,0 +1,13 @@
+{
+  "name": "tradingview-terminal",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js",
+    "build": "cd frontend && npm install && npm run build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "sql.js": "^1.14.1"
+  }
+}
