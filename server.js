@@ -5,14 +5,18 @@
  * Zero external API dependencies. Zero credentials needed.
  */
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const zlib = require('zlib');
-const { databaseLinker } = require('./databaseLinker');
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import zlib from 'zlib';
+import { fileURLToPath } from 'url';
+import { databaseLinker } from './databaseLinker.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || process.env.WEBSITE_PORT || '9000', 10);
-const DIST_DIR = path.join(__dirname, 'frontend', 'dist');
+const DIST_DIR = path.join(__dirname, 'dist');
 const WATCHLIST_CONFIG_PATH = path.join(__dirname, 'watchlist_config.json');
 
 const MIME_TYPES = {
@@ -98,7 +102,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/time' || pathname === '/api/time') {
       const sec = (Date.now() / 1000).toFixed(3);
       res.writeHead(200, {
-        'Content-Type': 'application/json',
+        'Content-Type': 'text/plain',
         'Access-Control-Allow-Origin': '*',
         'Cache-Control': 'no-cache'
       });
@@ -154,7 +158,34 @@ const server = http.createServer(async (req, res) => {
           return sendJson(res, 200, cfg);
         } catch {}
       }
-      return sendJson(res, 200, { defaultWatchlist: 'POPULAR', watchlists: { POPULAR: ['GCZ6', 'SIZ6'] } });
+      return sendJson(res, 200, { defaultWatchlist: 'POPULAR', watchlists: { POPULAR: ['GCZ6', 'SIZ6', 'NQZ6', 'ESZ6'] } });
+    }
+
+    if (pathname === '/api/watchlist/add' || pathname === '/api/watchlist/remove') {
+      return sendJson(res, 200, { ok: true });
+    }
+
+    // 8.5 Real-Time SSE Quote Stream
+    if (pathname === '/api/quote-stream') {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*'
+      });
+      res.write(': ok\n\n');
+      const timer = setInterval(async () => {
+        try {
+          const quotes = await databaseLinker.getQuotes(['GCZ6', 'SIZ6', 'NQZ6', 'ESZ6']);
+          if (quotes && quotes.d) {
+            for (const q of quotes.d) {
+              res.write(`data: ${JSON.stringify({ symbol: q.n, lp: q.v.lp, bid: q.v.bid, ask: q.v.ask, spread: q.v.spread })}\n\n`);
+            }
+          }
+        } catch {}
+      }, 3000);
+      req.on('close', () => clearInterval(timer));
+      return;
     }
 
     // 9. Static Assets (Frontend)
@@ -183,4 +214,4 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-module.exports = server;
+export default server;

@@ -4,9 +4,9 @@
  * Routes incoming UDF & Chart requests directly to databaseLinker.
  */
 
-const { databaseLinker } = require('../databaseLinker');
+import { databaseLinker } from '../databaseLinker.js';
 
-module.exports = async (req, res) => {
+export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', '*');
@@ -74,8 +74,16 @@ module.exports = async (req, res) => {
       return sendJson(200, databaseLinker.getHandshake());
     }
 
+    if (pathname === '/watchlist' || pathname === '/api/watchlist') {
+      return sendJson(200, { defaultWatchlist: 'POPULAR', watchlists: { POPULAR: ['GCZ6', 'SIZ6', 'NQZ6', 'ESZ6'] } });
+    }
+
+    if (pathname === '/watchlist/add' || pathname === '/api/watchlist/add' || pathname === '/watchlist/remove' || pathname === '/api/watchlist/remove') {
+      return sendJson(200, { ok: true });
+    }
+
     return sendJson(200, { ok: true, message: 'Database Linker Online (Pure SQL)' });
   } catch (err) {
     return sendJson(500, { error: err.message });
   }
-};
+}

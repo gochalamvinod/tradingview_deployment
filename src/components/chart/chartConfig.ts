@@ -37,13 +37,13 @@ interface BarState {
 }
 
 function createUniversalDatafeed(datafeedUrl: string) {
-  const effectiveUrl = datafeedUrl || 'http://127.0.0.1:8888';
+  const effectiveUrl = datafeedUrl || (typeof window !== 'undefined' ? window.location.origin : '');
   const base = new (window as any).Datafeeds.UDFCompatibleDatafeed(effectiveUrl, 10);
 
   // Track last valid bar per (symbol|resolution) to guarantee zero time-violation errors at 10ms UDF speed
   const activeRealtimeCleanups = new Map<string, () => void>();
 
-  // Route directly to SQL Manager backend at http://127.0.0.1:8888
+  // Route directly to SQL Manager backend
   if (base._requester) {
     base._requester.sendRequest = async (_url: string, endpoint: string, params?: Record<string, any>) => {
       switch (endpoint) {

@@ -10,8 +10,12 @@
  * 100% Offline & Pure SQL. Zero external API calls.
  */
 
-const fs = require('fs');
-const path = require('path');
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const DB_DIR = fs.existsSync(path.join(process.cwd(), 'database'))
   ? path.join(process.cwd(), 'database')
@@ -65,29 +69,32 @@ function getTimeframeSeconds(tf) {
   return (!isNaN(m) && m > 0) ? m * 60 : 60;
 }
 
+// Try loading better-sqlite3 at startup
+let BetterDatabase = null;
+try {
+  const mod = await import('better-sqlite3');
+  BetterDatabase = mod.default || mod;
+} catch {
+  BetterDatabase = null;
+}
+
+let SqlJsInit = null;
+
 class DatabaseLinker {
   constructor() {
-    this.driver = null; // 'better-sqlite3' | 'sql.js'
+    this.driver = BetterDatabase ? 'better-sqlite3' : 'sql.js';
     this.betterDbMap = new Map();
     this.sqlJsDbMap = new Map();
     this.SQL = null;
-    this.initDriver();
-  }
-
-  initDriver() {
-    try {
-      const Database = require('better-sqlite3');
-      this.BetterDatabase = Database;
-      this.driver = 'better-sqlite3';
-    } catch {
-      this.driver = 'sql.js';
-    }
   }
 
   async ensureSqlJs() {
     if (!this.SQL) {
-      const initSqlJs = require('sql.js');
-      this.SQL = await initSqlJs();
+      if (!SqlJsInit) {
+        const mod = await import('sql.js');
+        SqlJsInit = mod.default || mod;
+      }
+      this.SQL = await SqlJsInit();
     }
     return this.SQL;
   }
@@ -98,6 +105,7 @@ class DatabaseLinker {
   }
 
   getBetterDb(symbol) {
+    if (!BetterDatabase) return null;
     const cleanSym = sanitizeSymbol(symbol);
     if (this.betterDbMap.has(cleanSym)) {
       return this.betterDbMap.get(cleanSym);
@@ -108,7 +116,7 @@ class DatabaseLinker {
       return null;
     }
 
-    const db = new this.BetterDatabase(filePath, { readonly: true, fileMustExist: true });
+    const db = new BetterDatabase(filePath, { readonly: true, fileMustExist: true });
     db.pragma('journal_mode = WAL');
     db.pragma('synchronous = NORMAL');
     db.pragma('cache_size = -32000');
@@ -200,7 +208,7 @@ class DatabaseLinker {
     const cleanSym = sanitizeSymbol(symbol);
     const tfNorm = normalizeTimeframe(timeframe);
 
-    if (this.driver === 'better-sqlite3') {
+    if (this.driver === 'better-sqlite3' && BetterDatabase) {
       try {
         const entry = this.getBetterDb(cleanSym);
         if (!entry) return [];
@@ -215,7 +223,7 @@ class DatabaseLinker {
           return entry.stmts.selectAll.all(cleanSym, tfNorm);
         }
       } catch (err) {
-        // Fall back to sql.js if better-sqlite3 has issue
+        // Fall back to sql.js if better-sqlite3 encountered an error
         this.driver = 'sql.js';
       }
     }
@@ -504,7 +512,7 @@ class DatabaseLinker {
       const sym = sanitizeSymbol(raw);
       let latest = null;
 
-      if (this.driver === 'better-sqlite3') {
+      if (this.driver === 'better-sqlite3' && BetterDatabase) {
         try {
           const entry = this.getBetterDb(sym);
           if (entry) {
@@ -593,7 +601,7 @@ class DatabaseLinker {
 
 const databaseLinker = new DatabaseLinker();
 
-module.exports = {
+export {
   DatabaseLinker,
   databaseLinker,
   sanitizeSymbol,
