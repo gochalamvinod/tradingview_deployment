@@ -78,8 +78,24 @@ export default async function handler(req, res) {
       return sendJson(200, { defaultWatchlist: 'POPULAR', watchlists: { POPULAR: ['GCZ6', 'SIZ6', 'NQZ6', 'ESZ6'] } });
     }
 
-    if (pathname === '/watchlist/add' || pathname === '/api/watchlist/add' || pathname === '/watchlist/remove' || pathname === '/api/watchlist/remove') {
-      return sendJson(200, { ok: true });
+    if (pathname === '/debug' || pathname === '/api/debug') {
+      const debugData = {
+        platform: process.platform,
+        cwd: process.cwd(),
+        isVercel: !!process.env.VERCEL,
+        handshake: databaseLinker.getHandshake()
+      };
+      try {
+        const testRes = await databaseLinker.getHistory('GCZ6', '1', 0, 0, 10, true);
+        debugData.testHistory = {
+          status: testRes.s,
+          barCount: testRes.t ? testRes.t.length : 0,
+          latestClose: testRes.c ? testRes.c[testRes.c.length - 1] : null
+        };
+      } catch (e) {
+        debugData.testHistoryError = { message: e.message, stack: e.stack };
+      }
+      return sendJson(200, debugData);
     }
 
     return sendJson(200, { ok: true, message: 'Database Linker Online (Pure SQL)' });

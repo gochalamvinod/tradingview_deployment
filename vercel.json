@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/**/*.js": {
-      "includeFiles": "database/**"
+      "includeFiles": "database/**,public/sql-wasm.wasm,sql-wasm.wasm"
     }
   },
   "rewrites": [
@@ -12,6 +12,7 @@
     { "source": "/quotes", "destination": "/api" },
     { "source": "/search", "destination": "/api" },
     { "source": "/handshake", "destination": "/api" },
+    { "source": "/debug", "destination": "/api" },
     { "source": "/api/:path*", "destination": "/api" }
   ]
 }

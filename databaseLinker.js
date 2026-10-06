@@ -86,6 +86,8 @@ class DatabaseLinker {
     this.betterDbMap = new Map();
     this.sqlJsDbMap = new Map();
     this.SQL = null;
+    this.lastBetterError = null;
+    this.lastSqlJsError = null;
   }
 
   async ensureSqlJs() {
@@ -94,14 +96,40 @@ class DatabaseLinker {
         const mod = await import('sql.js');
         SqlJsInit = mod.default || mod;
       }
-      this.SQL = await SqlJsInit();
+      const candidates = [
+        path.join(process.cwd(), 'sql-wasm.wasm'),
+        path.join(process.cwd(), 'public', 'sql-wasm.wasm'),
+        path.join(process.cwd(), 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm'),
+        path.join(__dirname, 'sql-wasm.wasm')
+      ];
+      const wasmPath = candidates.find(p => fs.existsSync(p));
+      this.SQL = await SqlJsInit(wasmPath ? { locateFile: () => wasmPath } : undefined);
     }
     return this.SQL;
   }
 
   getDbFilePath(symbol) {
     const cleanSym = sanitizeSymbol(symbol);
-    return path.join(DB_DIR, `${cleanSym}.db`);
+    const sourcePath = path.join(DB_DIR, `${cleanSym}.db`);
+    if (!fs.existsSync(sourcePath)) {
+      return null;
+    }
+
+    // On AWS Lambda / Vercel serverless / Linux read-only filesystems,
+    // copy database to /tmp to guarantee 100% read/lock access without permissions issues.
+    if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || (process.platform === 'linux' && fs.existsSync('/tmp'))) {
+      const tmpPath = path.join('/tmp', `${cleanSym}.db`);
+      try {
+        if (!fs.existsSync(tmpPath) || fs.statSync(tmpPath).size !== fs.statSync(sourcePath).size) {
+          fs.copyFileSync(sourcePath, tmpPath);
+        }
+        return tmpPath;
+      } catch (err) {
+        console.warn('[DB] /tmp copy warning:', err.message);
+      }
+    }
+
+    return sourcePath;
   }
 
   getBetterDb(symbol) {
@@ -112,76 +140,83 @@ class DatabaseLinker {
     }
 
     const filePath = this.getDbFilePath(cleanSym);
-    if (!fs.existsSync(filePath)) {
+    if (!filePath || !fs.existsSync(filePath)) {
       return null;
     }
 
-    const db = new BetterDatabase(filePath, { readonly: true, fileMustExist: true });
-    db.pragma('journal_mode = WAL');
-    db.pragma('synchronous = NORMAL');
-    db.pragma('cache_size = -32000');
-    db.pragma('temp_store = MEMORY');
+    try {
+      const db = new BetterDatabase(filePath, { readonly: true, fileMustExist: true });
+      try {
+        db.pragma('query_only = ON');
+        db.pragma('cache_size = -32000');
+        db.pragma('temp_store = MEMORY');
+      } catch {}
 
-    const stmts = {
-      selectRange: db.prepare(`
-        SELECT timeSec, open, high, low, close, volume
-        FROM candles
-        WHERE symbol = ? AND timeframe = ? AND timeSec >= ? AND timeSec <= ?
-        ORDER BY timeSec ASC
-      `),
-      selectAll: db.prepare(`
-        SELECT timeSec, open, high, low, close, volume
-        FROM candles
-        WHERE symbol = ? AND timeframe = ?
-        ORDER BY timeSec ASC
-      `),
-      selectCountback: db.prepare(`
-        SELECT timeSec, open, high, low, close, volume
-        FROM (
+      const stmts = {
+        selectRange: db.prepare(`
           SELECT timeSec, open, high, low, close, volume
           FROM candles
-          WHERE symbol = ? AND timeframe = ? AND timeSec <= ?
-          ORDER BY timeSec DESC
-          LIMIT ?
-        )
-        ORDER BY timeSec ASC
-      `),
-      selectLatestN: db.prepare(`
-        SELECT timeSec, open, high, low, close, volume
-        FROM (
+          WHERE symbol = ? AND timeframe = ? AND timeSec >= ? AND timeSec <= ?
+          ORDER BY timeSec ASC
+        `),
+        selectAll: db.prepare(`
           SELECT timeSec, open, high, low, close, volume
           FROM candles
           WHERE symbol = ? AND timeframe = ?
+          ORDER BY timeSec ASC
+        `),
+        selectCountback: db.prepare(`
+          SELECT timeSec, open, high, low, close, volume
+          FROM (
+            SELECT timeSec, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND timeframe = ? AND timeSec <= ?
+            ORDER BY timeSec DESC
+            LIMIT ?
+          )
+          ORDER BY timeSec ASC
+        `),
+        selectLatestN: db.prepare(`
+          SELECT timeSec, open, high, low, close, volume
+          FROM (
+            SELECT timeSec, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND timeframe = ?
+            ORDER BY timeSec DESC
+            LIMIT ?
+          )
+          ORDER BY timeSec ASC
+        `),
+        latestSec: db.prepare(`
+          SELECT MAX(timeSec) as latestSec
+          FROM candles
+          WHERE symbol = ? AND timeframe = ?
+        `),
+        count: db.prepare(`
+          SELECT COUNT(*) as total
+          FROM candles
+          WHERE symbol = ? AND timeframe = ?
+        `),
+        totalCount: db.prepare(`
+          SELECT COUNT(*) as total FROM candles
+        `),
+        latestAny: db.prepare(`
+          SELECT timeSec, open, high, low, close, volume
+          FROM candles
+          WHERE symbol = ?
           ORDER BY timeSec DESC
-          LIMIT ?
-        )
-        ORDER BY timeSec ASC
-      `),
-      latestSec: db.prepare(`
-        SELECT MAX(timeSec) as latestSec
-        FROM candles
-        WHERE symbol = ? AND timeframe = ?
-      `),
-      count: db.prepare(`
-        SELECT COUNT(*) as total
-        FROM candles
-        WHERE symbol = ? AND timeframe = ?
-      `),
-      totalCount: db.prepare(`
-        SELECT COUNT(*) as total FROM candles
-      `),
-      latestAny: db.prepare(`
-        SELECT timeSec, open, high, low, close, volume
-        FROM candles
-        WHERE symbol = ?
-        ORDER BY timeSec DESC
-        LIMIT 1
-      `)
-    };
+          LIMIT 1
+        `)
+      };
 
-    const entry = { db, stmts, filePath };
-    this.betterDbMap.set(cleanSym, entry);
-    return entry;
+      const entry = { db, stmts, filePath };
+      this.betterDbMap.set(cleanSym, entry);
+      return entry;
+    } catch (err) {
+      this.lastBetterError = err.message + '\n' + err.stack;
+      console.error('[BETTER-SQLITE ERROR]', err);
+      return null;
+    }
   }
 
   async getSqlJsDb(symbol) {
@@ -191,17 +226,23 @@ class DatabaseLinker {
     }
 
     const filePath = this.getDbFilePath(cleanSym);
-    if (!fs.existsSync(filePath)) {
+    if (!filePath || !fs.existsSync(filePath)) {
       return null;
     }
 
-    await this.ensureSqlJs();
-    const fileBuffer = fs.readFileSync(filePath);
-    const db = new this.SQL.Database(fileBuffer);
+    try {
+      await this.ensureSqlJs();
+      const fileBuffer = fs.readFileSync(filePath);
+      const db = new this.SQL.Database(fileBuffer);
 
-    const entry = { db, filePath };
-    this.sqlJsDbMap.set(cleanSym, entry);
-    return entry;
+      const entry = { db, filePath };
+      this.sqlJsDbMap.set(cleanSym, entry);
+      return entry;
+    } catch (err) {
+      this.lastSqlJsError = err.message + '\n' + err.stack;
+      console.error('[SQL.JS ERROR]', err);
+      return null;
+    }
   }
 
   async queryBars(symbol, timeframe, fromSec, toSec, countback) {
@@ -211,19 +252,19 @@ class DatabaseLinker {
     if (this.driver === 'better-sqlite3' && BetterDatabase) {
       try {
         const entry = this.getBetterDb(cleanSym);
-        if (!entry) return [];
-
-        if (fromSec && toSec) {
-          return entry.stmts.selectRange.all(cleanSym, tfNorm, fromSec, toSec);
-        } else if (toSec && countback) {
-          return entry.stmts.selectCountback.all(cleanSym, tfNorm, toSec, countback);
-        } else if (countback) {
-          return entry.stmts.selectLatestN.all(cleanSym, tfNorm, countback);
-        } else {
-          return entry.stmts.selectAll.all(cleanSym, tfNorm);
+        if (entry) {
+          if (fromSec && toSec) {
+            return entry.stmts.selectRange.all(cleanSym, tfNorm, fromSec, toSec);
+          } else if (toSec && countback) {
+            return entry.stmts.selectCountback.all(cleanSym, tfNorm, toSec, countback);
+          } else if (countback) {
+            return entry.stmts.selectLatestN.all(cleanSym, tfNorm, countback);
+          } else {
+            return entry.stmts.selectAll.all(cleanSym, tfNorm);
+          }
         }
       } catch (err) {
-        // Fall back to sql.js if better-sqlite3 encountered an error
+        this.lastBetterError = err.message + '\n' + err.stack;
         this.driver = 'sql.js';
       }
     }
@@ -266,7 +307,8 @@ class DatabaseLinker {
       }
       stmt.free();
       return rows;
-    } catch {
+    } catch (err) {
+      this.lastSqlJsError = err.message + '\n' + err.stack;
       return [];
     }
   }
@@ -594,7 +636,9 @@ class DatabaseLinker {
         supported: FIXED_TIMEFRAMES,
         count: FIXED_TIMEFRAMES.length,
         ticksDisabled: true
-      }
+      },
+      lastBetterError: this.lastBetterError,
+      lastSqlJsError: this.lastSqlJsError
     };
   }
 }
