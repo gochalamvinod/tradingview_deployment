@@ -133,6 +133,34 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, history);
     }
 
+    // 4.5 Pure SQL Market Replay / Backtest Endpoints
+    if (pathname === '/replay-activate' || pathname === '/api/replay-activate') {
+      const sessionId = `replay_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+      return sendJson(res, 200, { ok: true, sessionId, status: 'REPLAY_ACTIVE' });
+    }
+
+    if (pathname === '/replay-history' || pathname === '/api/replay-history') {
+      const symbol = query.symbol || 'GCZ6';
+      const resolution = query.resolution || '1';
+      const currentReplayTime = Number(query.currentReplayTime) || 0;
+      const cutTimestamp = Number(query.cutTimestamp) || 0;
+      const from = Number(query.from) || 0;
+      const to = Number(query.to) || 0;
+      const firstDataRequest = query.firstDataRequest === 'true' || query.firstDataRequest === true || (!from && !to);
+      const countback = Number(query.countback) || 500;
+
+      const history = await databaseLinker.getReplayHistory(symbol, resolution, currentReplayTime, cutTimestamp, from, to, firstDataRequest, countback);
+      return sendJson(res, 200, history);
+    }
+
+    if (pathname === '/replay-confirm' || pathname === '/api/replay-confirm') {
+      return sendJson(res, 200, { success: true, confirmed: true });
+    }
+
+    if (pathname === '/replay-deactivate' || pathname === '/api/replay-deactivate') {
+      return sendJson(res, 200, { ok: true, status: 'REPLAY_INACTIVE' });
+    }
+
     // 5. Quotes Endpoint
     if (pathname === '/quotes' || pathname === '/api/quotes') {
       const quotes = await databaseLinker.getQuotes(query.symbols || query.symbol || 'GCZ6');

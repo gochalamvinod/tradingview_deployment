@@ -206,6 +206,24 @@ class DatabaseLinker {
           WHERE symbol = ?
           ORDER BY timeSec DESC
           LIMIT 1
+        `),
+        selectReplayPast: db.prepare(`
+          SELECT timeSec, open, high, low, close, volume
+          FROM (
+            SELECT timeSec, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = ? AND timeframe = ? AND timeSec <= ?
+            ORDER BY timeSec DESC
+            LIMIT ?
+          )
+          ORDER BY timeSec ASC
+        `),
+        selectReplayFuture: db.prepare(`
+          SELECT timeSec, open, high, low, close, volume
+          FROM candles
+          WHERE symbol = ? AND timeframe = ? AND timeSec > ?
+          ORDER BY timeSec ASC
+          LIMIT ?
         `)
       };
 
@@ -309,6 +327,48 @@ class DatabaseLinker {
       return rows;
     } catch (err) {
       this.lastSqlJsError = err.message + '\n' + err.stack;
+      return [];
+    }
+  }
+
+  async queryFutureBars(symbol, timeframe, afterSec, limit = 500) {
+    const cleanSym = sanitizeSymbol(symbol);
+    const tfNorm = normalizeTimeframe(timeframe);
+
+    if (this.driver === 'better-sqlite3' && BetterDatabase) {
+      try {
+        const entry = this.getBetterDb(cleanSym);
+        if (entry && entry.stmts.selectReplayFuture) {
+          return entry.stmts.selectReplayFuture.all(cleanSym, tfNorm, afterSec, limit);
+        }
+      } catch (err) {
+        this.driver = 'sql.js';
+      }
+    }
+
+    // sql.js execution
+    try {
+      const entry = await this.getSqlJsDb(cleanSym);
+      if (!entry) return [];
+
+      const query = 'SELECT timeSec, open, high, low, close, volume FROM candles WHERE symbol = ? AND timeframe = ? AND timeSec > ? ORDER BY timeSec ASC LIMIT ?';
+      const stmt = entry.db.prepare(query);
+      stmt.bind([cleanSym, tfNorm, afterSec, limit]);
+      const rows = [];
+      while (stmt.step()) {
+        const row = stmt.getAsObject();
+        rows.push({
+          timeSec: Number(row.timeSec),
+          open: Number(row.open),
+          high: Number(row.high),
+          low: Number(row.low),
+          close: Number(row.close),
+          volume: Number(row.volume || 1)
+        });
+      }
+      stmt.free();
+      return rows;
+    } catch {
       return [];
     }
   }
@@ -477,6 +537,116 @@ class DatabaseLinker {
     return {
       s: 'ok',
       t, o, h, l, c, v
+    };
+  }
+
+  async getReplayHistory(symbol, resolution, currentReplayTime, cutTimestamp, fromSec, toSec, firstDataRequest = false, countback = 500) {
+    const symUpper = sanitizeSymbol(symbol);
+    const tfNorm = normalizeTimeframe(resolution);
+
+    let cut = Number(cutTimestamp) || 0;
+    let curr = Number(currentReplayTime) || 0;
+    if (cut > 10000000000) cut = Math.floor(cut / 1000);
+    if (curr > 10000000000) curr = Math.floor(curr / 1000);
+    const effectiveCut = curr > 0 ? curr : cut;
+
+    const fromNum = Number(fromSec) || 0;
+    const toNum = Number(toSec) || 0;
+    const countNum = Math.max(50, Number(countback) || 500);
+
+    // 1. Query past bars up to effectiveCut
+    let pastBars = [];
+    if (firstDataRequest || !fromNum) {
+      pastBars = await this.queryBars(symUpper, tfNorm, null, effectiveCut > 0 ? effectiveCut : null, countNum);
+    } else {
+      const maxTo = effectiveCut > 0 ? Math.min(toNum, effectiveCut) : toNum;
+      if (fromNum <= maxTo) {
+        pastBars = await this.queryBars(symUpper, tfNorm, fromNum, maxTo, null);
+      }
+    }
+
+    // Multi-Timeframe synthesis for past bars if needed
+    const isWeeklyOrMonthly = ['1W', '1M'].includes(tfNorm);
+    if ((!pastBars || pastBars.length === 0) && isWeeklyOrMonthly) {
+      const dailyBars = await this.queryBars(symUpper, '1D', null, effectiveCut > 0 ? effectiveCut : null, countNum * 30);
+      if (dailyBars && dailyBars.length > 0) {
+        const agg = this.aggregateDailyBars(dailyBars, tfNorm);
+        if (agg.length > 0) pastBars = agg.slice(-countNum);
+      }
+    }
+
+    const tfSec = getTimeframeSeconds(tfNorm);
+    if ((!pastBars || pastBars.length === 0) && !isWeeklyOrMonthly && tfNorm !== '1' && tfSec >= 60) {
+      const base1mBars = await this.queryBars(symUpper, '1', null, effectiveCut > 0 ? effectiveCut : null, countNum * Math.floor(tfSec / 60));
+      if (base1mBars && base1mBars.length > 0) {
+        const agg = this.aggregateMinuteBars(base1mBars, tfSec);
+        if (agg.length > 0) pastBars = agg.slice(-countNum);
+      }
+    }
+
+    // Fallback if pastBars still empty
+    if ((!pastBars || pastBars.length === 0) && effectiveCut > 0) {
+      pastBars = await this.queryBars(symUpper, tfNorm, null, effectiveCut, countNum);
+    }
+
+    // 2. Query future runway bars (> effectiveCut)
+    let futureBars = [];
+    if (effectiveCut > 0) {
+      futureBars = await this.queryFutureBars(symUpper, tfNorm, effectiveCut, 500);
+
+      if ((!futureBars || futureBars.length === 0) && isWeeklyOrMonthly) {
+        const dailyFuture = await this.queryFutureBars(symUpper, '1D', effectiveCut, 500 * 30);
+        if (dailyFuture && dailyFuture.length > 0) {
+          futureBars = this.aggregateDailyBars(dailyFuture, tfNorm).slice(0, 500);
+        }
+      }
+
+      if ((!futureBars || futureBars.length === 0) && !isWeeklyOrMonthly && tfNorm !== '1' && tfSec >= 60) {
+        const base1mFuture = await this.queryFutureBars(symUpper, '1', effectiveCut, 500 * Math.floor(tfSec / 60));
+        if (base1mFuture && base1mFuture.length > 0) {
+          futureBars = this.aggregateMinuteBars(base1mFuture, tfSec).slice(0, 500);
+        }
+      }
+    }
+
+    const t = [];
+    const o = [];
+    const h = [];
+    const l = [];
+    const c = [];
+    const v = [];
+
+    for (const b of (pastBars || [])) {
+      t.push(b.timeSec);
+      o.push(b.open);
+      h.push(b.high);
+      l.push(b.low);
+      c.push(b.close);
+      v.push(b.volume || 1);
+    }
+
+    const ft = [];
+    const fo = [];
+    const fh = [];
+    const fl = [];
+    const fc = [];
+    const fv = [];
+
+    for (const b of (futureBars || [])) {
+      ft.push(b.timeSec);
+      fo.push(b.open);
+      fh.push(b.high);
+      fl.push(b.low);
+      fc.push(b.close);
+      fv.push(b.volume || 1);
+    }
+
+    return {
+      s: t.length > 0 ? 'ok' : 'no_data',
+      t, o, h, l, c, v,
+      ft, fo, fh, fl, fc, fv,
+      handshakeId: `hs_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      hash: 'replay_confirmed'
     };
   }
 
